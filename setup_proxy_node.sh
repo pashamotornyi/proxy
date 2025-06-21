@@ -16,7 +16,6 @@ for arg in "$@"; do
   [[ "$arg" == "--add-hosts" ]] && ADD_HOSTS=true
 done
 
-# Проверка
 if [[ -z "$FORWARD_IP" || -z "$PASSWORD" ]]; then
   echo "Использование: $0 <FORWARD_IP> <PASSWORD> [--disable-ufw] [--final] [--add-hosts]"
   exit 1
@@ -27,13 +26,10 @@ sudo apt update && sudo apt upgrade -y
 
 echo "[2/7] Установка Docker и Compose..."
 sudo apt install -y apt-transport-https ca-certificates curl gnupg lsb-release docker-compose
-
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
 sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io
-
 sudo usermod -aG docker "$USER"
 
 if $DISABLE_UFW; then
@@ -60,20 +56,16 @@ services:
         max-file: '10'
     command: -verbose -listen ss://AEAD_AES_256_GCM:${PASSWORD}@api:8388 -forward ss://AEAD_AES_256_GCM:${PASSWORD}@${FORWARD_IP}:8388
 EOF
-
   echo "[5/7] Запуск контейнера..."
   docker-compose up -d
 fi
 
 if $IS_FINAL; then
   echo "[6/7] Настройка конечного сервера Shadowsocks..."
-
   sudo apt install -y snapd
   sudo snap install shadowsocks-libev
-
   CONFIG_PATH="/var/snap/shadowsocks-libev/common/etc/shadowsocks-libev"
   sudo mkdir -p "$CONFIG_PATH"
-
   cat <<EOF | sudo tee "$CONFIG_PATH/config.json" > /dev/null
 {
   "server":["::0", "0.0.0.0"],
@@ -91,13 +83,10 @@ EOF
 
   echo "[Unit]
 Description=Shadowsocks-Libev Custom Server Service for %I
-Documentation=man:ss-server(1)
 After=network-online.target
-
 [Service]
 Type=simple
 ExecStart=/usr/bin/snap run shadowsocks-libev.ss-server -c $CONFIG_PATH/%i.json
-
 [Install]
 WantedBy=multi-user.target" | sudo tee /etc/systemd/system/shadowsocks-libev-server@.service > /dev/null
 
@@ -106,7 +95,7 @@ WantedBy=multi-user.target" | sudo tee /etc/systemd/system/shadowsocks-libev-ser
   sudo iptables -I INPUT -p udp --dport 8388 -j ACCEPT
 
   if $ADD_HOSTS; then
-    echo "[7/7] Обновление /etc/hosts для fapi.binance.com..."
+    echo "[7/7] Поиск лучшего IP для fapi.binance.com..."
 
     BINANCE_IPS=(
       "13.225.164.218" "13.227.61.59" "143.204.127.42" "13.35.51.41"
@@ -115,17 +104,37 @@ WantedBy=multi-user.target" | sudo tee /etc/systemd/system/shadowsocks-libev-ser
       "143.204.79.125" "65.9.40.137" "99.84.137.147" "18.65.212.131"
     )
 
-    declare -A results
+    declare -A ping_results
+    total=${#BINANCE_IPS[@]}
+    count=0
+
+    function progress_bar {
+      local progress=$1
+      local total=$2
+      local width=40
+      local filled=$((progress * width / total))
+      local empty=$((width - filled))
+      printf "\\rPing: [%${filled}s>%-${empty}s] %d/%d" "#" " " "$progress" "$total"
+    }
 
     for ip in "${BINANCE_IPS[@]}"; do
-      ping_time=$(ping -c 1 -W 1 "$ip" | grep 'time=' | awk -F'time=' '{print $2}' | awk '{print $1}')
-      results[$ip]=$ping_time
+      result=$(ping -c 1 -W 1 "$ip" | grep 'time=' | awk -F'time=' '{print $2}' | awk '{print $1}')
+      if [[ -n "$result" ]]; then
+        ping_results["$ip"]=$result
+      fi
+      count=$((count + 1))
+      progress_bar "$count" "$total"
     done
 
-    best_ip=$(for ip in "${!results[@]}"; do
-      echo "$ip ${results[$ip]}"
-    done | sort -k2 -n | head -n1 | awk '{print $1}')
+    echo ""
+    echo "IP-адрес | Время пинга (мс)"
+    for ip in "${!ping_results[@]}"; do
+      echo "$ip | ${ping_results[$ip]}"
+    done | sort -t '|' -k2 -n | tee /tmp/sorted_fapi_ping.txt
 
+    best_ip=$(head -n 1 /tmp/sorted_fapi_ping.txt | awk '{{print $1}}')
+    echo ""
+    echo "✅ Лучший IP: $best_ip → будет добавлен в /etc/hosts"
     echo "$best_ip fapi.binance.com" | sudo tee -a /etc/hosts > /dev/null
   fi
 fi
