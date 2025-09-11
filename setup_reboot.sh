@@ -16,7 +16,7 @@ SCRIPT_PATH="$(realpath "$0")"
 
 # Вывод шагов
 step() { printf "\n=== %s ===\n" "$*"; }
-ok() { printf "Ок\n"; }
+ok()  { printf "Ок\n"; }
 die() { printf "Ошибка: %s\n" "$*" >&2; exit 1; }
 require_root() { [[ $EUID -eq 0 ]] || die "Запускать от root"; }
 
