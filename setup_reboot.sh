@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # Настройка узла цепочки прокси.
 # - Промежуточный узел (по умолчанию): Glider в Docker, форвард на конечный Shadowsocks.
 # - Конечный узел (--final): Shadowsocks-libev (snap) как конечная точка.
-#
+
 # Использование:
 # setup_reboot.sh --forward-ip <IP> --password <PASS> [--final]
 # Примечание: --forward-ip обязателен для промежуточного узла; в режиме --final он не требуется.
@@ -93,11 +93,19 @@ fi
 
 START_STEP="${START_STEP:-1}"
 
-# [1/8] Обновление системы
+# [1/8] Обновление системы (неинтерактивно, авто‑рестарт сервисов)
 if [[ "$START_STEP" -le 1 ]]; then
-  step "[1/8] Обновление системы"
+  step "[1/8] Обновление системы (авто‑рестарт сервисов)"
+  # Подготовить needrestart к авто‑режиму на Ubuntu 20.04/22.04
+  if [[ -f /etc/needrestart/needrestart.conf ]]; then
+    sed -i "s/^\s*\$nrconf{restart}.*/\$nrconf{restart} = 'a';/; t; \$ a \$nrconf{restart} = 'a';" /etc/needrestart/needrestart.conf || true
+    sed -i "s/^\s*\$nrconf{kernelhints}.*/\$nrconf{kernelhints} = 0;/" /etc/needrestart/needrestart.conf || true
+  fi
   retry=3
-  until apt-get update && apt-get -y upgrade; do
+  until \
+    DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -y -o Dpkg::Options::="--force-confnew" upgrade
+  do
     ((retry--)); ((retry==0)) && die "apt upgrade не удалось"
     sleep 3
   done
@@ -108,7 +116,8 @@ fi
 # [2/8] Базовые инструменты
 if [[ "$START_STEP" -le 2 ]]; then
   step "[2/8] Установка базовых инструментов"
-  apt-get install -y ca-certificates curl gnupg lsb-release jq net-tools dnsutils iproute2 python3-pip
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y \
+    ca-certificates curl gnupg lsb-release jq net-tools dnsutils iproute2 python3-pip
   ok
   save_state 3
 fi
@@ -119,8 +128,8 @@ if [[ "$START_STEP" -le 3 ]]; then
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
-  apt-get update
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
   ok
   save_state 4
 fi
@@ -128,14 +137,12 @@ fi
 # [4/8] Настройка фаервола (открываем порты)
 if [[ "$START_STEP" -le 4 ]]; then
   step "[4/8] Настройка фаервола (открываем порты)"
-  # UFW: если установлен и активен — открыть порты
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q Status; then
     ufw allow 1080/tcp || true
     ufw allow 8388/tcp || true
     ufw allow 8388/udp || true
     ufw reload || true
   fi
-  # iptables: на всякий случай тоже открыть
   iptables -I INPUT -p tcp --dport 1080 -j ACCEPT || true
   iptables -I INPUT -p tcp --dport 8388 -j ACCEPT || true
   iptables -I INPUT -p udp --dport 8388 -j ACCEPT || true
@@ -181,7 +188,7 @@ fi
 # [6/8] Конечный узел (Shadowsocks-libev)
 if [[ "$IS_FINAL" == true && "$START_STEP" -le 6 ]]; then
   step "[6/8] Настройка конечного узла (Shadowsocks-libev)"
-  apt-get install -y snapd
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y snapd
   snap install shadowsocks-libev
   CONFIG_PATH="/var/snap/shadowsocks-libev/common/etc/shadowsocks-libev"
   install -d -m 755 "$CONFIG_PATH"
