@@ -1,0 +1,8 @@
+[Unit] Description=Discord Proxy Setup Bot After=network-online.target
+[Service]
+WorkingDirectory=/opt/discord-bot
+EnvironmentFile=/opt/discord-bot/.env
+ExecStart=/opt/discord-bot/venv/bin/python /opt/discord-bot/bot.py
+Restart=on-failure
+User=root
+[Install] WantedBy=multi-user.target
