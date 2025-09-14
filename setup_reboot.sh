@@ -95,7 +95,7 @@ START_STEP="${START_STEP:-1}"
 
 # [1/8] Обновление системы (неинтерактивно, авто‑рестарт сервисов)
 if [[ "$START_STEP" -le 1 ]]; then
-  step "[1/8] Обновление системы (авто‑рестарт сервисов)"
+  step "[1/8] Обновление системы (авто-рестарт сервисов)"
   # Подготовить needrestart к авто‑режиму на Ubuntu 20.04/22.04
   if [[ -f /etc/needrestart/needrestart.conf ]]; then
     sed -i "s/^\s*\$nrconf{restart}.*/\$nrconf{restart} = 'a';/; t; \$ a \$nrconf{restart} = 'a';" /etc/needrestart/needrestart.conf || true
