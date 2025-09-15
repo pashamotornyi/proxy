@@ -102,7 +102,7 @@ class RoleView(discord.ui.View):
 # Порядок полей важен: ssh_pass идёт вторым сразу после host
 class IntermediateModal(discord.ui.Modal, title="Промежуточный сервер"):
     host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)  # 1 [6]
-    ssh_pass = discord.ui.TextInput(label="SSH пароль (опционально при входе по ключу)", required=False)  # 2 [6]
+    ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)  # 2 [6]
     forward_ip = discord.ui.TextInput(label="IP следующего сервера", placeholder="5.6.7.8", required=True)  # 3 [6]
     ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)  # 4 [6]
 
@@ -122,7 +122,7 @@ class IntermediateModal(discord.ui.Modal, title="Промежуточный се
 
 class FinalModal(discord.ui.Modal, title="Финальный сервер"):
     host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)  # 1 [6]
-    ssh_pass = discord.ui.TextInput(label="SSH пароль (опционально при входе по ключу)", required=False)  # 2 [6]
+    ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)  # 2 [6]
     ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)  # 3 [6]
 
     async def on_submit(self, interaction: discord.Interaction):
