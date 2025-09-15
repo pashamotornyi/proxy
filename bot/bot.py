@@ -153,8 +153,9 @@ async def download_script(url: str) -> bytes:
 async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_path: str) -> None:
     # Передача по SFTP в рамках существующего SSH-сеанса [2]
     async with conn.start_sftp_client() as sftp:
-        async with sftp.open(remote_path, "w") as f:
-            await f.write(data)
+        async with sftp.open(remote_path, "wb") as f:  # бинарный режим
+            await f.write(data)  # data уже bytes
+
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)  # делаем исполняемым [2]
 
 # ================= Выполнение на удалённом сервере =================
