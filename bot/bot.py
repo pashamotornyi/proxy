@@ -9,7 +9,7 @@ from discord.ext import commands
 import asyncssh
 import aiohttp
 
-# ================= Конфигурация окружения =================
+# ================= Конфигурация окружения 1 =================
 TOKEN = os.environ["DISCORD_BOT_TOKEN"]                                # токен бота [4]
 SCRIPT_URL = os.environ["SCRIPT_URL"]                                  # RAW URL на setup_reboot.sh [4]
 ALLOWED_CHANNEL_ID = int(os.environ.get("ALLOWED_CHANNEL_ID", "0"))    # канал для кнопки [4]
