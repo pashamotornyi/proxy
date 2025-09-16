@@ -5,9 +5,8 @@ set -Eeuo pipefail
 # Настройка узла цепочки прокси.
 # - Промежуточный узел (по умолчанию): Glider в Docker, форвард на конечный Shadowsocks.
 # - Конечный узел (--final): Shadowsocks-libev (snap) как конечная точка.
-
 # Использование:
-# setup_reboot.sh --forward-ip <IP> --password <PASS> [--final]
+#   setup_reboot.sh --forward-ip <IP> --password <PASS> [--final]
 # Примечание: --forward-ip обязателен для промежуточного узла; в режиме --final он не требуется.
 
 STATE_FILE="/root/.setup_state"
@@ -48,13 +47,48 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable "${SERVICE_NAME}"
+  systemctl enable --quiet "${SERVICE_NAME}"
 }
 
 disable_resume_service() {
-  systemctl disable "${SERVICE_NAME}" || true
+  systemctl disable --quiet "${SERVICE_NAME}" || true
   rm -f "/etc/systemd/system/${SERVICE_NAME}.service" || true
   systemctl daemon-reload
+}
+
+# Безопасные apt-хелперы (ожидание локов + мягкая остановка u-u при необходимости)
+apt_safe_update_upgrade() {
+  # 1) Пробуем штатно, ожидая локи до 10 минут
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update
+  if ! DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+       apt-get -o DPkg::Lock::Timeout=600 -y -o Dpkg::Options::="--force-confnew" upgrade; then
+    # 2) Если не удалось (обычно из-за unattended-upgrades), мягко приостанавливаем и ждём освобождения lock
+    systemctl stop unattended-upgrades || true
+    # ждём освобождения фронтенд-лока до 5 минут
+    for i in $(seq 1 60); do
+      if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then break; fi
+      sleep 5
+    done
+    # повторная попытка
+    DEBIAN_FRONTEND=noninteractive apt-get -y update
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+      apt-get -y -o Dpkg::Options::="--force-confnew" upgrade
+    systemctl start unattended-upgrades || true
+  fi
+}
+
+apt_safe_install() {
+  # update с ожиданием локов до 10 минут (не всегда нужно, но безопасно)
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update || true
+  if ! DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o DPkg::Lock::Timeout=600 -y install "$@"; then
+    systemctl stop unattended-upgrades || true
+    for i in $(seq 1 60); do
+      if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then break; fi
+      sleep 5
+    done
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -y install "$@"
+    systemctl start unattended-upgrades || true
+  fi
 }
 
 # Аргументы
@@ -62,7 +96,6 @@ FORWARD_IP=""
 PASSWORD=""
 IS_FINAL=false
 RESUME=false
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --forward-ip) FORWARD_IP="${2:?}"; shift 2;;
@@ -102,10 +135,7 @@ if [[ "$START_STEP" -le 1 ]]; then
     sed -i "s/^\s*\$nrconf{kernelhints}.*/\$nrconf{kernelhints} = 0;/" /etc/needrestart/needrestart.conf || true
   fi
   retry=3
-  until \
-    DEBIAN_FRONTEND=noninteractive apt-get update && \
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -y -o Dpkg::Options::="--force-confnew" upgrade
-  do
+  until apt_safe_update_upgrade; do
     ((retry--)); ((retry==0)) && die "apt upgrade не удалось"
     sleep 3
   done
@@ -116,8 +146,7 @@ fi
 # [2/8] Базовые инструменты
 if [[ "$START_STEP" -le 2 ]]; then
   step "[2/8] Установка базовых инструментов"
-  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y \
-    ca-certificates curl gnupg lsb-release jq net-tools dnsutils iproute2 python3-pip
+  apt_safe_install ca-certificates curl gnupg lsb-release jq net-tools dnsutils iproute2 python3-pip
   ok
   save_state 3
 fi
@@ -161,7 +190,7 @@ services:
     container_name: glider-proxy
     restart: unless-stopped
     ports:
-      - "1080:1080"   # SOCKS5 (опционально: добавить listen)
+      - "1080:1080"   # SOCKS5
       - "8388:8388"   # Shadowsocks
     logging:
       driver: json-file
@@ -188,7 +217,7 @@ fi
 # [6/8] Конечный узел (Shadowsocks-libev)
 if [[ "$IS_FINAL" == true && "$START_STEP" -le 6 ]]; then
   step "[6/8] Настройка конечного узла (Shadowsocks-libev)"
-  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y snapd
+  apt_safe_install snapd
   snap install shadowsocks-libev
   CONFIG_PATH="/var/snap/shadowsocks-libev/common/etc/shadowsocks-libev"
   install -d -m 755 "$CONFIG_PATH"
@@ -206,7 +235,7 @@ if [[ "$IS_FINAL" == true && "$START_STEP" -le 6 ]]; then
   "method": "aes-256-gcm"
 }
 EOF
-  cat > /etc/systemd/system/shadowsocks-libev-server@.service <<EOF
+  cat > /etc/systemd/system/shadowsocks-libev-server@.service <<'EOF'
 [Unit]
 Description=Shadowsocks-Libev Custom Server Service for %I
 After=network-online.target
@@ -214,14 +243,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/snap run shadowsocks-libev.ss-server -c $CONFIG_PATH/%i.json
+# CONFIG_PATH определяется в юните через Environment=
+Environment=CONFIG_PATH=/var/snap/shadowsocks-libev/common/etc/shadowsocks-libev
+ExecStart=/usr/bin/snap run shadowsocks-libev.ss-server -c ${CONFIG_PATH}/%i.json
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now shadowsocks-libev-server@config
+  systemctl enable --quiet --now shadowsocks-libev-server@config
   ok
   save_state 7
 fi
