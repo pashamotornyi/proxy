@@ -17,7 +17,7 @@ ALLOWED_ROLE = os.environ.get("ALLOWED_ROLE", "")                      # имя 
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip().isdigit()}  # белый список ID [4]
 ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"                     # разрешить всем (отладка) [4]
 QUIET = os.environ.get("QUIET", "") == "1"                             # тихий режим статусов [4]
-SSH_KNOWN_HOSTS = None  # для продакшена задайте known_hosts/проверку host key [1]
+SSH_KNOWN_HOSTS = None  # для продакшена задайте known_hosts/проверку host key [3]
 
 # ================= Discord клиент =================
 intents = discord.Intents.default()                                    # для UI достаточно default [4]
@@ -141,39 +141,40 @@ async def download_script(url: str) -> bytes:
 async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_path: str) -> None:
     async with conn.start_sftp_client() as sftp:
         async with sftp.open(remote_path, "wb") as f:
-            await f.write(data)  # запись bytes по SFTP [1]
-    await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)  # делаем исполняемым [1]
+            await f.write(data)  # запись bytes по SFTP [3]
+    await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)  # делаем исполняемым [3]
 
 # ================= Исполнители шагов =================
 async def run_silent(conn: asyncssh.SSHClientConnection, cmd: str):
     result = await conn.run(cmd, check=False)
-    return result.exit_status, (result.stdout or ""), (result.stderr or "")  # rc/out/err [1]
+    return result.exit_status, (result.stdout or ""), (result.stderr or "")  # rc/out/err [3]
 
 async def run_and_stream(conn: asyncssh.SSHClientConnection, cmd: str, send, title: str = "") -> int:
     if title:
         await send(f"— {title} —")  # заголовок [4]
     async with conn.create_process(cmd) as proc:
         async for line in proc.stdout:
-            # показываем только маркеры шагов из скрипта, подавляя подробный вывод docker/apt
+            # Показываем только маркеры шагов из скрипта, подавляя подробный вывод
             if line.startswith("=== ["):
-                await send(line.strip())  # метки шагов [1]
+                await send(line.strip())  # маркеры [3]
         rc = await proc.wait()
-    await send("Ок" if rc == 0 else f"Ошибка (код {rc})")  # статус по коду возврата [1]
-    return rc  # rc наружу [1]
+    # Успех строго по коду возврата:
+    await send("Ок" if rc == 0 else f"Ошибка (код {rc})")  # без ложных "Ошибка ... rc:0" [3]
+    return rc
 
 async def run_step(send, title: str, coro):
     await send(f"— {title} —")  # заголовок секции [4]
     try:
         rc, out, err = await coro
         if rc == 0:
-            await send("Ок")  # успех — stderr игнорируем [1]
+            await send("Ок")  # успех — stderr игнорируем [3]
             return True
         tail_src = (err or out or "").strip().splitlines()[-3:]
         suffix = (": " + " | ".join(tail_src)) if tail_src else ""
-        await send(f"Ошибка (код {rc}){suffix}")  # краткий контекст при ошибке [1]
+        await send(f"Ошибка (код {rc}){suffix}")  # краткий контекст [3]
         return False
     except Exception as e:
-        await send(f"Ошибка: {e}")  # исключение шага [1]
+        await send(f"Ошибка: {e}")  # исключение [3]
         return False
 
 # ================= Выполнение на удалённом сервере =================
@@ -183,53 +184,48 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
         if chunk.strip():
             await interaction.followup.send(chunk, ephemeral=True)  # followup после defer [6]
 
-    await send("Подключение по SSH…")  # старт [1]
+    await send("Подключение по SSH…")  # старт [3]
     conn_kwargs = dict(
         host=params["host"], username=params["user"],
         known_hosts=SSH_KNOWN_HOSTS, port=params["port"],
         password=params.get("password", None),
-    )  # параметры AsyncSSH [1]
+    )  # параметры AsyncSSH [3]
 
     try:
-        async with asyncssh.connect(**conn_kwargs) as conn:  # SSH‑сессия [1]
+        async with asyncssh.connect(**conn_kwargs) as conn:  # SSH‑сессия [3]
             # 1) Передача скрипта
-            await send("— Передача скрипта —")  # этап [4]
+            await send("— Передача скрипта —")
             try:
                 content = await download_script(SCRIPT_URL)  # скачиваем на боте [4]
-                await sftp_upload(conn, content, "setup_reboot.sh")  # отправляем по SFTP [1]
-                await send("Ок")  # подтверждение [4]
+                await sftp_upload(conn, content, "setup_reboot.sh")  # отправляем по SFTP [3]
+                await send("Ок")
             except Exception as e:
                 await send(f"Ошибка: {e}")
-                return  # прерывание [4]
+                return
 
             # 2) Запуск установки — однострочная команда
             if mode == "final":
-                run_cmd = f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"  # финальный узел [4]
+                run_cmd = f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"
             else:
-                run_cmd = f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}"  # промежуточный узел [4]
+                run_cmd = f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}"
 
-            if QUIET:
-                ok = await run_step(send, "Установка", run_silent(conn, run_cmd))  # тихий режим [1]
-                if not ok:
-                    return  # останов при ошибке [1]
-            else:
-                rc = await run_and_stream(conn, run_cmd, send, title="Установка")  # стриминг меток [1]
-                if rc != 0:
-                    return  # останов при ошибке [1]
+            # Стриминговый прогресс (видны только маркеры шагов):
+            rc = await run_and_stream(conn, run_cmd, send, title="Установка")
+            if rc != 0:
+                return
 
-            # 3) Ребут — это и есть успешное завершение настройки
-            await send("Ок")  # явный финальный успех установки [1]
-            await send("— Перезагрузка сервера через 15 секунд —")  # уведомление [2]
-            # Планируем отложенный ребут в фоне, чтобы успеть отправить сообщения в Discord
-            await run_silent(conn, "nohup sh -c 'sleep 15; systemctl reboot' >/dev/null 2>&1 &")  # фоновая перезагрузка [3]
-            await send("Готово. Сервер перезагрузится; подождите 1–2 минуты.")  # информация [2]
+            # 3) Считаем установку успешно завершённой и немедленно планируем ребут
+            await send("Ок")  # финальный успех [3]
+            await send("— Перезагрузка сервера через 15 секунд —")  # уведомление [1]
+            await run_silent(conn, "nohup sh -c 'sleep 15; systemctl reboot' >/dev/null 2>&1 &")  # фоновый ребут [2]
+            await send("Готово. Сервер перезагрузится; подождите 1–2 минуты.")  # информация [1]
 
-            # 4) Сразу показать новое меню для следующего процесса настройки
+            # 4) Сразу показываем новое меню для следующего процесса
             await interaction.followup.send("Выберите тип сервера:", view=RoleView(), ephemeral=True)  # новое меню [4]
-            return  # завершаем обработку [4]
+            return
 
     except Exception as e:
-        await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)  # общий перехват [1]
+        await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)  # общий перехват [3]
 
 # ================= Инициализация и публикация кнопки =================
 @bot.event
