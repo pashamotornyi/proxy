@@ -9,7 +9,7 @@ from discord.ext import commands
 import asyncssh
 import aiohttp
 
-# ================= Конфигурация окружения 1 =================
+# ================= Конфигурация окружения =================
 TOKEN = os.environ["DISCORD_BOT_TOKEN"]                                # токен бота [1]
 SCRIPT_URL = os.environ["SCRIPT_URL"]                                  # RAW URL на setup_reboot.sh [1]
 ALLOWED_CHANNEL_ID = int(os.environ.get("ALLOWED_CHANNEL_ID", "0"))    # канал для кнопки [1]
@@ -173,4 +173,85 @@ async def run_step(send, title: str, coro):
         await send(f"Ошибка (код {rc}){suffix}")  # краткий контекст при ошибке [2]
         return False
     except Exception as e:
-        await
+        await send(f"Ошибка: {e}")  # исключение шага [2]
+        return False
+
+# ================= Выполнение на удалённом сервере =================
+async def run_remote_setup(interaction: discord.Interaction, mode: str, params: dict):
+    async def send(text: str):
+        # Discord ограничение 2000 символов; оставим запас под форматирование
+        chunk = text[-1800:] if len(text) > 1800 else text
+        if chunk.strip():
+            await interaction.followup.send(chunk, ephemeral=True)  # followup после defer [6]
+
+    await send("Подключение по SSH…")  # старт [2]
+    conn_kwargs = dict(
+        host=params["host"], username=params["user"],
+        known_hosts=SSH_KNOWN_HOSTS, port=params["port"],
+        password=params.get("password", None),
+    )  # параметры AsyncSSH [2]
+
+    try:
+        async with asyncssh.connect(**conn_kwargs) as conn:  # SSH‑сессия [2]
+            # 1) Передача скрипта
+            await send("— Передача скрипта —")
+            try:
+                content = await download_script(SCRIPT_URL)  # скачиваем на боте [1]
+                await sftp_upload(conn, content, "setup_reboot.sh")  # отправляем по SFTP [2]
+                await send("Ок")
+            except Exception as e:
+                await send(f"Ошибка: {e}")
+                return
+
+            # 2) Запуск установки — однострочная команда
+            if mode == "final":
+                run_cmd = f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"
+            else:
+                run_cmd = f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}"
+
+            if QUIET:
+                ok = await run_step(send, "Установка", run_silent(conn, run_cmd))
+                if not ok:
+                    return
+            else:
+                rc = await run_and_stream(conn, run_cmd, send, title="Установка")
+                if rc != 0:
+                    return
+
+            # 3) Перезагрузка по завершении финальной установки
+            if REBOOT_AFTER_SETUP and mode == "final":
+                await send("Ок")  # явный финальный успех установки [2]
+                await send("— Перезагрузка сервера через 15 секунд —")  # уведомление [5]
+                # Надёжная отложенная перезагрузка в фоне, чтобы успеть завершить SSH и отправить сообщения
+                # Используем nohup + sleep + systemctl reboot (фоново)
+                await run_silent(conn, "nohup sh -c 'sleep 15; systemctl reboot' >/dev/null 2>&1 &")  # планирование ребута [7]
+                await send("Готово. Сервер перезагрузится; подождите 1–2 минуты и проверьте доступ.")
+                return
+
+            # 4) Повторное меню (если не перезагружаем)
+            await interaction.followup.send("Выберите тип сервера:", view=RoleView(), ephemeral=True)  # новое меню [6]
+
+    except Exception as e:
+        await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)  # общий перехват [2]
+
+# ================= Инициализация и публикация кнопки =================
+@bot.event
+async def on_ready():
+    try:
+        await bot.tree.sync()  # синхронизация app‑команд [6]
+    except Exception as e:
+        print("Slash sync error:", e)
+    print(f"Logged in as {bot.user}")
+    if ALLOWED_CHANNEL_ID:
+        ch = bot.get_channel(ALLOWED_CHANNEL_ID)
+        if ch:
+            try:
+                await ch.send(
+                    "Нажмите кнопку, чтобы начать приватный мастер настройки прокси.",
+                    view=StartView()
+                )  # стартовое сообщение [6]
+            except Exception as e:
+                print("Failed to send start message:", e)
+
+if __name__ == "__main__":
+    bot.run(TOKEN)  # запуск клиента [1]
