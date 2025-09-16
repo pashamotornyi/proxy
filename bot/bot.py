@@ -68,7 +68,7 @@ update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US:en >/dev/null 2
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US:en
 echo "--- locale (first lines) ---"
 locale | sed -n '1,8p'
-"""  # включает en_US.UTF‑8 и печатает первые строки locale для диагностики при QUIET=0 [2]
+"""  # включает en_US.UTF‑8; при QUIET=0 можно видеть первые строки locale 
 
 # ================= UI: кнопки и модалки =================
 class StartView(discord.ui.View):
@@ -80,13 +80,13 @@ class StartView(discord.ui.View):
         if not user_allowed_ctx(interaction):
             await interaction.response.send_message("Недостаточно прав для запуска мастера.", ephemeral=True)  # приватный отказ 
             return
-        await interaction.response.defer(ephemeral=True)  # подтверждение 
+        await interaction.response.defer(ephemeral=True)  # подтверждение [2]
         try:
             dm = await interaction.user.create_dm()
             await dm.send("Выберите тип сервера:", view=RoleView())  # переход в DM 
-            await interaction.followup.send("Открыл личные сообщения.", ephemeral=True)  # уведомление 
+            await interaction.followup.send("Открыл личные сообщения.", ephemeral=True)  # уведомление [2]
         except discord.Forbidden:
-            await interaction.followup.send("Не удалось написать в личные сообщения (закрыт DM).", ephemeral=True)  # DM закрыт 
+            await interaction.followup.send("Не удалось написать в личные сообщения (закрыт DM).", ephemeral=True)  # DM закрыт [2]
 
 class RoleView(discord.ui.View):
     def __init__(self):
@@ -102,13 +102,13 @@ class RoleView(discord.ui.View):
 
 # Порядок полей: ssh_pass вторым и обязательным
 class IntermediateModal(discord.ui.Modal, title="Промежуточный сервер"):
-    host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)  # 1 [3]
-    ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)  # 2 [3]
-    forward_ip = discord.ui.TextInput(label="IP следующего сервера", placeholder="5.6.7.8", required=True)  # 3 [3]
-    ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)  # 4 [3]
+    host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)  # 1 [2]
+    ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)  # 2 [2]
+    forward_ip = discord.ui.TextInput(label="IP следующего сервера", placeholder="5.6.7.8", required=True)  # 3 [2]
+    ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)  # 4 [2]
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)  # индикатор 
+        await interaction.response.defer(ephemeral=True, thinking=True)  # индикатор [2]
         if not valid_ip(str(self.forward_ip)):
             return await interaction.followup.send("Некорректный forward_ip.", ephemeral=True)  # проверка 
         params = dict(
@@ -122,12 +122,12 @@ class IntermediateModal(discord.ui.Modal, title="Промежуточный се
         await run_remote_setup(interaction, mode="intermediate", params=params)  # запуск 
 
 class FinalModal(discord.ui.Modal, title="Финальный сервер"):
-    host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)  # 1 [3]
-    ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)  # 2 [3]
-    ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)  # 3 [3]
+    host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)  # 1 [2]
+    ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)  # 2 [2]
+    ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)  # 3 [2]
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)  # индикатор 
+        await interaction.response.defer(ephemeral=True, thinking=True)  # индикатор [2]
         params = dict(
             host=str(self.host),
             user="root",
@@ -139,28 +139,26 @@ class FinalModal(discord.ui.Modal, title="Финальный сервер"):
 
 # ================= Загрузка и передача файла по SFTP =================
 async def download_script(url: str) -> bytes:
-    # HTTP-клиент на стороне бота с редиректами и проверкой шебанга [4]
     async with aiohttp.ClientSession() as session:
         async with session.get(url, allow_redirects=True) as resp:
             data = await resp.read()
             if resp.status != 200 or not data:
-                raise RuntimeError(f"Download failed: HTTP {resp.status}")  # сигнализируем ошибку [4]
+                raise RuntimeError(f"Download failed: HTTP {resp.status}")  # сигнализируем ошибку [3]
     text = data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
     if not text.startswith("#!"):
-        raise RuntimeError("Downloaded content is not a script (no shebang)")  # защита от HTML/404 [4]
-    return text.encode("utf-8")  # нормализованный UTF‑8 [4]
+        raise RuntimeError("Downloaded content is not a script (no shebang)")  # защита от HTML/404 [3]
+    return text.encode("utf-8")  # нормализованный UTF‑8 [3]
 
 async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_path: str) -> None:
-    # Передача по SFTP и chmod +x под тем же SSH [1]
     async with conn.start_sftp_client() as sftp:
         async with sftp.open(remote_path, "wb") as f:
             await f.write(data)  # бинарная запись bytes [1]
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)  # делаем исполняемым [1]
 
-# ================= Исполнители шагов =================
+# ================= Исполнители шагов (успех по коду возврата) =================
 async def run_silent(conn: asyncssh.SSHClientConnection, cmd: str, use_bash: bool = False):
     exec_cmd = cmd if not use_bash else f'/bin/bash -lc {sh_esc(cmd)}'  # единый вход [1]
-    result = await conn.run(exec_cmd, check=False)  # без исключений, чтобы вернуть код [1]
+    result = await conn.run(exec_cmd, check=False)  # не бросаем исключение [1]
     return result.exit_status, (result.stdout or ""), (result.stderr or "")  # код/выводы [1]
 
 async def run_step(send, title: str, coro):
@@ -168,37 +166,37 @@ async def run_step(send, title: str, coro):
     try:
         rc, out, err = await coro  # выполняем подзадачу [1]
         if rc == 0:
-            await send("Ок")  # краткий успех 
+            await send("Ок")  # краткий успех [4]
             return True
         else:
-            await send(f"Ошибка (код {rc})")  # краткая ошибка 
+            tail_src = (err or out or "").strip().splitlines()[-3:]
+            suffix = (": " + " | ".join(tail_src)) if tail_src else ""
+            await send(f"Ошибка (код {rc}){suffix}")  # краткая ошибка [4]
             return False
     except Exception as e:
-        await send(f"Ошибка: {e}")  # исключение шага 
+        await send(f"Ошибка: {e}")  # исключение шага [4]
         return False
 
 async def run_and_stream(conn: asyncssh.SSHClientConnection, cmd: str, send, title: str = "", use_bash: bool = False) -> int:
-    # Потоковый режим для детального вывода, если QUIET=0 
-    exec_cmd = cmd if not use_bash else f'/bin/bash -lc {sh_esc(cmd)}'  # запуск через bash -lc при пайпах [1]
+    exec_cmd = cmd if not use_bash else f'/bin/bash -lc {sh_esc(cmd)}'  # запуск через bash -lc [1]
     if title:
         await send(f"— {title} —")  # секция 
     async with conn.create_process(exec_cmd) as proc:
         async for line in proc.stdout:
-            # Только маркерные строки из install-скрипта, чтобы избежать "шума" 
             if ("=== [" in line) or ("Ок" in line) or ("Ошибка" in line):
-                await send(line.strip())
+                await send(line.strip())  # только маркеры 
         rc = await proc.wait()
-    await send("Ок" if rc == 0 else f"Ошибка (код {rc})")  # финал шага 
-    return rc  # возврат кода [1]
+    await send("Ок" if rc == 0 else f"Ошибка (код {rc})")  # финальный статус по коду [4]
+    return rc  # код возврата [1]
 
 # ================= Выполнение на удалённом сервере =================
 async def run_remote_setup(interaction: discord.Interaction, mode: str, params: dict):
     async def send(text: str):
-        chunk = text[-1800:] if len(text) > 1800 else text  # лимит сообщения 
+        chunk = text[-1800:] if len(text) > 1800 else text  # лимит сообщения [2]
         if chunk.strip():
-            await interaction.followup.send(chunk, ephemeral=True)  # приватно в DM 
+            await interaction.followup.send(chunk, ephemeral=True)  # приватно в DM [2]
 
-    await send("Подключение по SSH и проверка локали (UTF‑8)…")  # старт [2]
+    await send("Подключение по SSH и проверка локали (UTF‑8)…")  # старт 
     conn_kwargs = dict(
         host=params["host"],
         username=params["user"],
@@ -209,20 +207,24 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
 
     try:
         async with asyncssh.connect(**conn_kwargs) as conn:  # SSH сессия [1]
-            # 1) Локаль: тихо или подробно в зависимости от QUIET
+            # 1) Локаль
             if QUIET:
-                await run_step(send, "Локаль", run_silent(conn, LOCALE_FIX, use_bash=True))  # кратко [2]
+                ok = await run_step(send, "Локаль", run_silent(conn, LOCALE_FIX, use_bash=True))  # кратко 
+                if not ok:
+                    return  # при ошибке прерываем [4]
             else:
-                await run_and_stream(conn, LOCALE_FIX, send, title="Локаль", use_bash=True)  # подробно [2]
+                rc = await run_and_stream(conn, LOCALE_FIX, send, title="Локаль", use_bash=True)  # подробно 
+                if rc != 0:
+                    return  # при ошибке прерываем [4]
 
             # 2) Передача скрипта по SFTP (всегда кратко)
             await send("— Передача скрипта —")  # заголовок 
             try:
-                content = await download_script(SCRIPT_URL)  # скачиваем с машины бота [4]
+                content = await download_script(SCRIPT_URL)  # качаем на боте [3]
                 await sftp_upload(conn, content, "setup_reboot.sh")  # отправляем по SFTP [1]
-                await send("Ок")  # успех 
+                await send("Ок")  # успех [4]
             except Exception as e:
-                await send(f"Ошибка: {e}")  # краткая ошибка 
+                await send(f"Ошибка: {e}")  # краткая ошибка [4]
                 return
 
             # 3) Запуск установки
@@ -232,9 +234,16 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
                 run_cmd = f'./setup_reboot.sh --forward-ip {sh_esc(params["forward_ip"])} --password {sh_esc(params["ss_password"])}'  # промежуточный 
 
             if QUIET:
-                await run_step(send, "Установка", run_silent(conn, run_cmd, use_bash=True))  # кратко 
+                ok = await run_step(send, "Установка", run_silent(conn, run_cmd, use_bash=True))  # кратко [4]
+                if not ok:
+                    return  # при ошибке прерываем [4]
             else:
-                await run_and_stream(conn, run_cmd, send, title="Установка", use_bash=True)  # маркерные строки 
+                rc = await run_and_stream(conn, run_cmd, send, title="Установка", use_bash=True)  # маркерный стрим [1]
+                if rc != 0:
+                    return  # при ошибке прерываем [4]
+
+            # 4) После успеха сразу показать повторный выбор
+            await interaction.followup.send("Выберите тип сервера:", view=RoleView(), ephemeral=True)  # новое меню [2]
     except Exception as e:
         await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)  # ошибки подключения [1]
 
