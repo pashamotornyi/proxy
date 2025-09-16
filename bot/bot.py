@@ -42,7 +42,7 @@ def user_allowed_ctx(interaction: discord.Interaction) -> bool:
         member = interaction.guild.get_member(interaction.user.id) or interaction.user
         if ALLOWED_ROLE and isinstance(member, discord.Member) and any(r.name == ALLOWED_ROLE for r in member.roles):
             return True  # роль [3]
-        return isinstance(member, discord.Member) и member.guild_permissions.administrator  # админ [3]
+        return isinstance(member, discord.Member) and member.guild_permissions.administrator  # админ [3]
     if ALLOWED_CHANNEL_ID:
         ch = interaction.client.get_channel(ALLOWED_CHANNEL_ID)
         guild = getattr(ch, "guild", None)
