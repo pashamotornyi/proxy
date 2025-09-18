@@ -3,6 +3,7 @@
 import os, ipaddress, discord, asyncssh, aiohttp
 from discord.ext import commands
 
+# ===== Конфигурация =====
 TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 SCRIPT_URL = os.environ["SCRIPT_URL"]
 ALLOWED_CHANNEL_ID = int(os.environ.get("ALLOWED_CHANNEL_ID", "0"))
@@ -11,11 +12,13 @@ ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") 
 ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"
 TAIL_LOG_ON_ERROR = os.environ.get("TAIL_LOG_ON_ERROR", "")
 SSH_KNOWN_HOSTS = None
-BUILD_TAG = "bot-hard-2025-09-18-16-58"
+BUILD_TAG = "bot-hard2-2025-09-18-17-05"
 
+# ===== Discord клиент =====
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ===== Хелперы =====
 def valid_ip(v: str) -> bool:
     try: ipaddress.ip_address(v); return True
     except Exception: return False
@@ -33,6 +36,7 @@ def user_allowed_ctx(interaction: discord.Interaction) -> bool:
         return isinstance(m, discord.Member) and m.guild_permissions.administrator
     return False
 
+# ===== UI =====
 class RoleView(discord.ui.View):
     def __init__(self): super().__init__(timeout=600)
     @discord.ui.button(label="Промежуточный сервер", style=discord.ButtonStyle.secondary, custom_id="intermediate")
@@ -84,6 +88,7 @@ class FinalModal(discord.ui.Modal):
             ss_password=str(self.ss_password.value)
         ))
 
+# ===== Транспорт =====
 async def download_script(url: str) -> bytes:
     async with aiohttp.ClientSession() as s:
         async with s.get(url, allow_redirects=True) as r:
@@ -98,12 +103,14 @@ async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_pa
         async with sftp.open(remote_path, "wb") as f: await f.write(data)
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)
 
+# ===== Выполнение =====
 async def run_and_stream(conn: asyncssh.SSHClientConnection, cmd: str, send, title: str) -> int:
     await send(f"— {title} —")
     async with conn.create_process(cmd) as proc:
         async for raw in proc.stdout:
             line = raw.rstrip("\r\n")
-            if line.lstrip().startswith("=== ["): await send(line.strip())
+            if line and line.lstrip().startswith("=== ["):
+                await send(line.strip())
         rc = await proc.wait()
     await send(f"RC: {rc}")
     return rc
@@ -115,7 +122,7 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
     await send(f"Подключение по SSH… [{BUILD_TAG}]")
     try:
         async with asyncssh.connect(
-            host=params["host"], username=params["user"], port=params["port"],
+            host=params["host"], username=params["user"], port=params.get("port",22),
             password=params.get("password"), known_hosts=SSH_KNOWN_HOSTS
         ) as conn:
             await send("— Передача скрипта —")
@@ -123,10 +130,9 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
             await sftp_upload(conn, content, "setup_reboot.sh")
             await send("Ок")
 
-            if mode == "final":
-                run_cmd = f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"
-            else:
-                run_cmd = f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}"
+            run_cmd = (f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"
+                       if mode == "final"
+                       else f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}")
 
             rc = await run_and_stream(conn, run_cmd, send, "Установка")
             if rc != 0:
@@ -136,18 +142,20 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
                     if snip: await send("Последние строки лога:\n" + snip[-1700:])
                 return
 
-            # Успех: ребут немедленно
-            await send("— STEP_END —")
-            await send("— Перезагрузка сервера через 15 секунд —")
-            await conn.run("nohup sh -c 'sleep 15; systemctl reboot' >/dev/null 2>&1 &", check=False)
-            await send("Готово. Сервер перезагрузится; подождите 1–2 минуты.")
-            await interaction.followup.send("Выберите тип сервера:", view=RoleView(), ephemeral=True)
+            # Успех: объединённое сообщение + ребут + новое меню под защитой
+            try:
+                await send("— STEP_END —\n— Перезагрузка сервера через 15 секунд —\nГотово. Сервер перезагрузится; подождите 1–2 минуты.")
+                await conn.run("nohup sh -c 'sleep 15; systemctl reboot' >/dev/null 2>&1 &", check=False)
+                await interaction.followup.send("Выберите тип сервера:", view=RoleView(), ephemeral=True)
+            except Exception as e:
+                await interaction.followup.send(f"POST-OK error: {e}", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)
 
+# ===== Запуск =====
 @bot.event
 async def on_ready():
-    print(f"Starting ProxySetup HARD, {BUILD_TAG}")
+    print(f"Starting ProxySetup HARD2, {BUILD_TAG}")
     if ALLOWED_CHANNEL_ID:
         ch = bot.get_channel(ALLOWED_CHANNEL_ID)
         if ch:
