@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 import os
 import ipaddress
 import asyncio
@@ -9,26 +8,24 @@ from discord.ext import commands
 import asyncssh
 import aiohttp
 
-# ================= Конфигурация окружения 123 =================
-TOKEN = os.environ["DISCORD_BOT_TOKEN"]                                # токен бота
-SCRIPT_URL = os.environ["SCRIPT_URL"]                                  # RAW URL на setup_reboot.sh
-ALLOWED_CHANNEL_ID = int(os.environ.get("ALLOWED_CHANNEL_ID", "0"))    # канал для кнопки
-ALLOWED_ROLE = os.environ.get("ALLOWED_ROLE", "")                      # имя роли (опц.)
-ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip().isdigit()}  # белый список ID
-ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"                     # разрешить всем (отладка)
-QUIET = os.environ.get("QUIET", "") == "1"                             # тихий режим статусов
-TAIL_LOG_ON_ERROR = os.environ.get("TAIL_LOG_ON_ERROR", "")            # путь к логу для tail при ошибке (опц.)
-SSH_KNOWN_HOSTS = None  # для продакшена задайте known_hosts/проверку host key
+TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+SCRIPT_URL = os.environ["SCRIPT_URL"]
+ALLOWED_CHANNEL_ID = int(os.environ.get("ALLOWED_CHANNEL_ID", "0"))
+ALLOWED_ROLE = os.environ.get("ALLOWED_ROLE", "")
+ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip().isdigit()}
+ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"
+QUIET = os.environ.get("QUIET", "") == "1"
+TAIL_LOG_ON_ERROR = os.environ.get("TAIL_LOG_ON_ERROR", "")
+SSH_KNOWN_HOSTS = None
 
-# ================= Discord клиент =================
+BUILD_TAG = "bot-verify-2025-09-18-16-10"
+
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ================= Вспомогательные функции =================
 def valid_ip(v: str) -> bool:
     try:
-        ipaddress.ip_address(v)
-        return True
+        ipaddress.ip_address(v); return True
     except Exception:
         return False
 
@@ -36,10 +33,8 @@ def sh_esc(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 def user_allowed_ctx(interaction: discord.Interaction) -> bool:
-    if ALLOW_ALL:
-        return True
-    if ALLOWED_USERS and interaction.user.id in ALLOWED_USERS:
-        return True
+    if ALLOW_ALL: return True
+    if ALLOWED_USERS and interaction.user.id in ALLOWED_USERS: return True
     if interaction.guild:
         member = interaction.guild.get_member(interaction.user.id) or interaction.user
         if ALLOWED_ROLE and isinstance(member, discord.Member) and any(r.name == ALLOWED_ROLE for r in member.roles):
@@ -56,16 +51,12 @@ def user_allowed_ctx(interaction: discord.Interaction) -> bool:
                 return member.guild_permissions.administrator
     return False
 
-# ================= UI: кнопки и модалки =================
 class StartView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
+    def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="Начать настройку", style=discord.ButtonStyle.primary, custom_id="start_setup")
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not user_allowed_ctx(interaction):
-            await interaction.response.send_message("Недостаточно прав для запуска мастера.", ephemeral=True)
-            return
+            await interaction.response.send_message("Недостаточно прав для запуска мастера.", ephemeral=True); return
         await interaction.response.defer(ephemeral=True)
         try:
             dm = await interaction.user.create_dm()
@@ -75,13 +66,10 @@ class StartView(discord.ui.View):
             await interaction.followup.send("Не удалось написать в личные сообщения (закрыт DM).", ephemeral=True)
 
 class RoleView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=600)
-
+    def __init__(self): super().__init__(timeout=600)
     @discord.ui.button(label="Промежуточный сервер", style=discord.ButtonStyle.secondary, custom_id="intermediate")
     async def inter(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(IntermediateModal(title="Промежуточный сервер"))
-
     @discord.ui.button(label="Финальный сервер", style=discord.ButtonStyle.success, custom_id="final")
     async def final(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(FinalModal(title="Финальный сервер"))
@@ -95,7 +83,6 @@ class IntermediateModal(discord.ui.Modal):
         self.ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)
         for comp in (self.host, self.ssh_pass, self.forward_ip, self.ss_password):
             self.add_item(comp)
-
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         if not valid_ip(str(self.forward_ip.value)):
@@ -116,7 +103,6 @@ class FinalModal(discord.ui.Modal):
         self.ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)
         for comp in (self.host, self.ssh_pass, self.ss_password):
             self.add_item(comp)
-
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         params = dict(
@@ -126,7 +112,6 @@ class FinalModal(discord.ui.Modal):
         )
         await run_remote_setup(interaction, mode="final", params=params)
 
-# ================= Загрузка и передача файла по SFTP =================
 async def download_script(url: str) -> bytes:
     async with aiohttp.ClientSession() as session:
         async with session.get(url, allow_redirects=True) as resp:
@@ -144,7 +129,6 @@ async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_pa
             await f.write(data)
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)
 
-# ================= Исполнители шагов =================
 async def run_silent(conn: asyncssh.SSHClientConnection, cmd: str):
     result = await conn.run(cmd, check=False)
     return result.exit_status, (result.stdout or ""), (result.stderr or "")
@@ -153,12 +137,18 @@ async def run_and_stream(conn: asyncssh.SSHClientConnection, cmd: str, send, tit
     if title:
         await send(f"— {title} —")
     async with conn.create_process(cmd) as proc:
-        async for line in proc.stdout:
-            # Печатаем только собственные метки шагов из скрипта
+        async for raw in proc.stdout:
+            line = raw.rstrip("\r\n")
+            if not line:
+                continue
             if line.lstrip().startswith("=== ["):
                 await send(line.strip())
         rc = await proc.wait()
-    await send("Ок" if rc == 0 else f"Ошибка (код {rc})")
+    # Важно: при rc==0 всегда "Ок"
+    if rc == 0:
+        await send("Ок")
+    else:
+        await send(f"Ошибка (код {rc})")
     return rc
 
 async def run_step(send, title: str, coro):
@@ -166,24 +156,20 @@ async def run_step(send, title: str, coro):
     try:
         rc, out, err = await coro
         if rc == 0:
-            await send("Ок")
-            return True
+            await send("Ок"); return True
         tail_src = (err or out or "").strip().splitlines()[-3:]
         suffix = (": " + " | ".join(tail_src)) if tail_src else ""
-        await send(f"Ошибка (код {rc}){suffix}")
-        return False
+        await send(f"Ошибка (код {rc}){suffix}"); return False
     except Exception as e:
-        await send(f"Ошибка: {e}")
-        return False
+        await send(f"Ошибка: {e}"); return False
 
-# ================= Выполнение на удалённом сервере =================
 async def run_remote_setup(interaction: discord.Interaction, mode: str, params: dict):
     async def send(text: str):
         chunk = text[-1800:] if len(text) > 1800 else text
         if chunk.strip():
             await interaction.followup.send(chunk, ephemeral=True)
 
-    await send("Подключение по SSH…")
+    await send(f"Подключение по SSH… [{BUILD_TAG}]")
     conn_kwargs = dict(
         host=params["host"], username=params["user"],
         known_hosts=SSH_KNOWN_HOSTS, port=params["port"],
@@ -192,25 +178,22 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
 
     try:
         async with asyncssh.connect(**conn_kwargs) as conn:
-            # 1) Передача скрипта
             await send("— Передача скрипта —")
             try:
                 content = await download_script(SCRIPT_URL)
                 await sftp_upload(conn, content, "setup_reboot.sh")
                 await send("Ок")
             except Exception as e:
-                await send(f"Ошибка: {e}")
-                return
+                await send(f"Ошибка: {e}"); return
 
-            # 2) Запуск установки
-            if mode == "final":
-                run_cmd = f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"
-            else:
-                run_cmd = f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}"
+            run_cmd = (
+                f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"
+                if mode == "final"
+                else f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}"
+            )
 
             rc = await run_and_stream(conn, run_cmd, send, title="Установка")
             if rc != 0:
-                # по желанию — хвост лога для диагностики
                 if TAIL_LOG_ON_ERROR:
                     tail_cmd = f"tail -n 80 {sh_esc(TAIL_LOG_ON_ERROR)}"
                     _, tail_out, tail_err = await run_silent(conn, tail_cmd)
@@ -219,8 +202,8 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
                         await send("Последние строки лога:\n" + snippet[-1700:])
                 return
 
-            # 3) Успех: ребут и новое меню
-            await send("Ок")
+            # Гарантийный маркер и ребут
+            await send("— STEP_END —")
             await send("— Перезагрузка сервера через 15 секунд —")
             await run_silent(conn, "nohup sh -c 'sleep 15; systemctl reboot' >/dev/null 2>&1 &")
             await send("Готово. Сервер перезагрузится; подождите 1–2 минуты.")
@@ -230,13 +213,13 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
     except Exception as e:
         await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)
 
-# ================= Инициализация и публикация кнопки =================
 @bot.event
 async def on_ready():
     try:
         await bot.tree.sync()
     except Exception as e:
         print("Slash sync error:", e)
+    print(f"Starting ProxySetup, {BUILD_TAG}")
     print(f"Logged in as {bot.user}")
     if ALLOWED_CHANNEL_ID:
         ch = bot.get_channel(ALLOWED_CHANNEL_ID)
