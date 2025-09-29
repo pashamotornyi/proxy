@@ -13,12 +13,11 @@ ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") 
 ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"
 
 # SSH приоритет и тайминги
-SSH_PORTS = [22, 2222]
 CONNECT_TIMEOUT = 45
 LOGIN_TIMEOUT = 90
 KEEPALIVE_INTERVAL = 15
 
-BUILD_TAG = "bot-ssh-socket-fix-no-kbdint-2025-09-29-16-12"
+BUILD_TAG = "bot-ssh-banner-delay-2025-09-29-16-33"
 
 # ===== Discord клиент =====
 intents = discord.Intents.default()
@@ -106,7 +105,9 @@ async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_pa
             await f.write(data)
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)
 
-# ===== Подключение поверх готового TCP-сокета (IPv4) =====
+# ===== Подключение поверх готового TCP-сокета (IPv4) с баннером/задержкой =====
+OPENSSH_BANNER = "SSH-2.0-OpenSSH_8.9p1"
+
 def _fmt_exc(e: Exception) -> str:
     return f"{type(e).__name__}: {str(e) or '(no message)'}"
 
@@ -121,7 +122,19 @@ async def _open_tcp_ipv4(host: str, port: int, timeout: int) -> socket.socket:
     return s
 
 async def _connect_over_sock(sock: socket.socket, username: str, password: str):
-    # Убраны kbd_interactive_auth/password_auth — asyncssh сам выберет методы
+    loop = asyncio.get_event_loop()
+    # короткая задержка перед handshake
+    await asyncio.sleep(0.3)
+    # попытка прочитать баннер сервера (если пришёл)
+    try:
+        sock.settimeout(5)
+        _ = await loop.sock_recv(sock, 256)
+    except Exception:
+        pass
+    finally:
+        sock.settimeout(CONNECT_TIMEOUT)
+
+    # создаём SSH‑клиент поверх уже открытого сокета
     return await asyncssh.connect(
         None,
         username=username,
@@ -133,11 +146,13 @@ async def _connect_over_sock(sock: socket.socket, username: str, password: str):
         keepalive_interval=KEEPALIVE_INTERVAL,
         family=socket.AF_INET,
         sock=sock,
+        client_version=OPENSSH_BANNER,
     )
 
 async def connect_resilient(host: str, username: str, password: str):
     reasons = []
 
+    # Две попытки на 22
     for attempt in (1, 2):
         try:
             sock = await _open_tcp_ipv4(host, 22, CONNECT_TIMEOUT)
@@ -151,6 +166,7 @@ async def connect_resilient(host: str, username: str, password: str):
             reasons.append(f"22/tcp{attempt}: {_fmt_exc(e)}")
         await asyncio.sleep(1.0)
 
+    # Порт 2222
     try:
         sock = await _open_tcp_ipv4(host, 2222, CONNECT_TIMEOUT)
         try:
@@ -210,7 +226,7 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
 # ===== Инициализация =====
 @bot.event
 async def on_ready():
-    print(f"Starting ProxySetup socket-mode fixed, {BUILD_TAG}")
+    print(f"Starting ProxySetup banner-delay mode, {BUILD_TAG}")
     if ALLOWED_CHANNEL_ID:
         ch = bot.get_channel(ALLOWED_CHANNEL_ID)
         if ch:
