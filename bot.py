@@ -18,7 +18,7 @@ CONNECT_TIMEOUT = 45
 LOGIN_TIMEOUT = 90
 KEEPALIVE_INTERVAL = 15
 
-BUILD_TAG = "bot-ssh-puTTY-like-over-sock-2025-09-29-15-58"
+BUILD_TAG = "bot-ssh-socket-fix-no-kbdint-2025-09-29-16-12"
 
 # ===== Discord клиент =====
 intents = discord.Intents.default()
@@ -106,7 +106,7 @@ async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_pa
             await f.write(data)
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)
 
-# ===== Подключение как у PuTTY: TCP -> asyncssh поверх сокета =====
+# ===== Подключение поверх готового TCP-сокета (IPv4) =====
 def _fmt_exc(e: Exception) -> str:
     return f"{type(e).__name__}: {str(e) or '(no message)'}"
 
@@ -121,6 +121,7 @@ async def _open_tcp_ipv4(host: str, port: int, timeout: int) -> socket.socket:
     return s
 
 async def _connect_over_sock(sock: socket.socket, username: str, password: str):
+    # Убраны kbd_interactive_auth/password_auth — asyncssh сам выберет методы
     return await asyncssh.connect(
         None,
         username=username,
@@ -130,9 +131,6 @@ async def _connect_over_sock(sock: socket.socket, username: str, password: str):
         connect_timeout=CONNECT_TIMEOUT,
         login_timeout=LOGIN_TIMEOUT,
         keepalive_interval=KEEPALIVE_INTERVAL,
-        password_auth=True,
-        kbd_interactive_auth=False,
-        agent_path=None,
         family=socket.AF_INET,
         sock=sock,
     )
@@ -140,7 +138,6 @@ async def _connect_over_sock(sock: socket.socket, username: str, password: str):
 async def connect_resilient(host: str, username: str, password: str):
     reasons = []
 
-    # Две попытки на 22: TCP затем рукопожатие
     for attempt in (1, 2):
         try:
             sock = await _open_tcp_ipv4(host, 22, CONNECT_TIMEOUT)
@@ -154,7 +151,6 @@ async def connect_resilient(host: str, username: str, password: str):
             reasons.append(f"22/tcp{attempt}: {_fmt_exc(e)}")
         await asyncio.sleep(1.0)
 
-    # Одна попытка на 2222
     try:
         sock = await _open_tcp_ipv4(host, 2222, CONNECT_TIMEOUT)
         try:
@@ -214,7 +210,7 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
 # ===== Инициализация =====
 @bot.event
 async def on_ready():
-    print(f"Starting ProxySetup PuTTY-like socket mode, {BUILD_TAG}")
+    print(f"Starting ProxySetup socket-mode fixed, {BUILD_TAG}")
     if ALLOWED_CHANNEL_ID:
         ch = bot.get_channel(ALLOWED_CHANNEL_ID)
         if ch:
