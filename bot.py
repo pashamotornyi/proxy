@@ -4,7 +4,7 @@ import os, asyncio, ssl, discord, asyncssh, aiohttp
 from asyncssh.misc import DisconnectError, ConnectionLost
 from discord.ext import commands
 
-# ===== Конфигурация =====
+# ===== Конфигурация ===== #
 TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 SCRIPT_URL = os.environ["SCRIPT_URL"]
 ALLOWED_CHANNEL_ID = int(os.environ.get("ALLOWED_CHANNEL_ID", "0"))
