@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, asyncio, ssl, discord, asyncssh, aiohttp
+import os, asyncio, ssl, socket, discord, asyncssh, aiohttp
 from asyncssh.misc import DisconnectError, ConnectionLost
 from discord.ext import commands
 
-# ===== Конфигурация ===== #
+# ===== Конфигурация =====
 TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 SCRIPT_URL = os.environ["SCRIPT_URL"]
 ALLOWED_CHANNEL_ID = int(os.environ.get("ALLOWED_CHANNEL_ID", "0"))
@@ -12,13 +12,13 @@ ALLOWED_ROLE = os.environ.get("ALLOWED_ROLE", "")
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip().isdigit()}
 ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"
 
-# SSH приоритет и таймауты
+# SSH приоритет и тайминги
 SSH_PORTS = [22, 2222]
-CONNECT_TIMEOUT = 30
-LOGIN_TIMEOUT = 60
+CONNECT_TIMEOUT = 45
+LOGIN_TIMEOUT = 90
 KEEPALIVE_INTERVAL = 15
 
-BUILD_TAG = "bot-ssh-22-retry-diagnostics-2025-09-29-15-29"
+BUILD_TAG = "bot-ssh-puTTY-like-over-sock-2025-09-29-15-58"
 
 # ===== Discord клиент =====
 intents = discord.Intents.default()
@@ -88,7 +88,7 @@ class FinalModal(discord.ui.Modal):
             ss_password=str(self.ss_password.value)
         ))
 
-# ===== Транспорт =====
+# ===== Загрузка скрипта =====
 async def download_script(url: str) -> bytes:
     async with aiohttp.ClientSession() as s:
         async with s.get(url, allow_redirects=True) as r:
@@ -106,36 +106,65 @@ async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_pa
             await f.write(data)
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)
 
-# ===== Подключение по SSH c ретраями на 22 и подробной диагностикой =====
+# ===== Подключение как у PuTTY: TCP -> asyncssh поверх сокета =====
 def _fmt_exc(e: Exception) -> str:
-    t = type(e).__name__
-    s = str(e) or "(no message)"
-    return f"{t}: {s}"
+    return f"{type(e).__name__}: {str(e) or '(no message)'}"
 
-async def _try_once(host, port, username, password, timeout):
+async def _open_tcp_ipv4(host: str, port: int, timeout: int) -> socket.socket:
+    loop = asyncio.get_event_loop()
+    infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+    af, socktype, proto, _, sa = infos[0]
+    s = socket.socket(af, socktype, proto)
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    s.settimeout(timeout)
+    await loop.sock_connect(s, sa)
+    return s
+
+async def _connect_over_sock(sock: socket.socket, username: str, password: str):
     return await asyncssh.connect(
-        host=host, port=port, username=username, password=password,
-        known_hosts=None, client_keys=None,
-        connect_timeout=timeout, login_timeout=LOGIN_TIMEOUT,
-        keepalive_interval=KEEPALIVE_INTERVAL
+        None,
+        username=username,
+        password=password,
+        known_hosts=None,
+        client_keys=None,
+        connect_timeout=CONNECT_TIMEOUT,
+        login_timeout=LOGIN_TIMEOUT,
+        keepalive_interval=KEEPALIVE_INTERVAL,
+        password_auth=True,
+        kbd_interactive_auth=False,
+        agent_path=None,
+        family=socket.AF_INET,
+        sock=sock,
     )
 
 async def connect_resilient(host: str, username: str, password: str):
     reasons = []
 
-    # Две попытки на 22 с паузой
+    # Две попытки на 22: TCP затем рукопожатие
     for attempt in (1, 2):
         try:
-            return await _try_once(host, 22, username, password, CONNECT_TIMEOUT)
-        except (DisconnectError, ConnectionLost, TimeoutError, OSError, ssl.SSLError, Exception) as e:
-            reasons.append(f"22/try{attempt}: {_fmt_exc(e)}")
-            await asyncio.sleep(1.5)
+            sock = await _open_tcp_ipv4(host, 22, CONNECT_TIMEOUT)
+            try:
+                return await _connect_over_sock(sock, username, password)
+            except Exception as e:
+                reasons.append(f"22/handshake{attempt}: {_fmt_exc(e)}")
+                try: sock.close()
+                except: pass
+        except Exception as e:
+            reasons.append(f"22/tcp{attempt}: {_fmt_exc(e)}")
+        await asyncio.sleep(1.0)
 
     # Одна попытка на 2222
     try:
-        return await _try_once(host, 2222, username, password, CONNECT_TIMEOUT)
+        sock = await _open_tcp_ipv4(host, 2222, CONNECT_TIMEOUT)
+        try:
+            return await _connect_over_sock(sock, username, password)
+        except Exception as e:
+            reasons.append(f"2222/handshake: {_fmt_exc(e)}")
+            try: sock.close()
+            except: pass
     except Exception as e:
-        reasons.append(f"2222: {_fmt_exc(e)}")
+        reasons.append(f"2222/tcp: {_fmt_exc(e)}")
 
     raise RuntimeError("SSH не доступен. Подробности: " + " ; ".join(reasons))
 
@@ -169,7 +198,7 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
                         await send("Настройка завершена. Перезагружаем сервер.")
                         try:
                             dm = await interaction.user.create_dm()
- #                           await dm.send("Настройка завершена. Перезагружаем сервер.")
+#                            await dm.send("Настройка завершена. Перезагружаем сервер.")
                             await dm.send("Выберите тип сервера:", view=RoleView())
                         except Exception:
                             pass
@@ -185,7 +214,7 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
 # ===== Инициализация =====
 @bot.event
 async def on_ready():
-    print(f"Starting ProxySetup SSH 22-retry, {BUILD_TAG}")
+    print(f"Starting ProxySetup PuTTY-like socket mode, {BUILD_TAG}")
     if ALLOWED_CHANNEL_ID:
         ch = bot.get_channel(ALLOWED_CHANNEL_ID)
         if ch:
