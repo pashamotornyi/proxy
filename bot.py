@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, asyncio, ssl, socket, discord, asyncssh, aiohttp
-from asyncssh.misc import DisconnectError, ConnectionLost
+import os, asyncio, discord, asyncssh, aiohttp
 from discord.ext import commands
 
 # ===== Конфигурация =====
@@ -12,12 +11,16 @@ ALLOWED_ROLE = os.environ.get("ALLOWED_ROLE", "")
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip().isdigit()}
 ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"
 
-# SSH приоритет и тайминги
-CONNECT_TIMEOUT = 45
-LOGIN_TIMEOUT = 90
-KEEPALIVE_INTERVAL = 15
+# SSH параметры
+SSH_PORTS = [22, 2222]
+CONNECT_TIMEOUT = 10
+LOGIN_TIMEOUT = 45
+KEEPALIVE_INTERVAL = 10
+KEX_ALGS = ['curve25519-sha256']
+CIPHERS = ['chacha20-poly1305@openssh.com']
+HOSTKEY_ALGS = ['ssh-ed25519']
 
-BUILD_TAG = "bot-ssh-banner-delay-2025-09-29-16-33"
+BUILD_TAG = "bot-pty-finished-suppress-2025-09-23-16-42"
 
 # ===== Discord клиент =====
 intents = discord.Intents.default()
@@ -37,7 +40,6 @@ def user_allowed_ctx(interaction: discord.Interaction) -> bool:
         return isinstance(m, discord.Member) and m.guild_permissions.administrator
     return False
 
-# ===== UI =====
 class RoleView(discord.ui.View):
     def __init__(self): super().__init__(timeout=600)
     @discord.ui.button(label="Промежуточный сервер", style=discord.ButtonStyle.secondary, custom_id="intermediate")
@@ -69,7 +71,7 @@ class IntermediateModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await run_remote_setup(interaction, "intermediate", dict(
-            host=str(self.host.value), user="root", password=str(self.ssh_pass.value),
+            host=str(self.host.value), user="root", port=None, password=str(self.ssh_pass.value),
             forward_ip=str(self.forward_ip.value), ss_password=str(self.ss_password.value)
         ))
 
@@ -83,117 +85,59 @@ class FinalModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await run_remote_setup(interaction, "final", dict(
-            host=str(self.host.value), user="root", password=str(self.ssh_pass.value),
+            host=str(self.host.value), user="root", port=None, password=str(self.ssh_pass.value),
             ss_password=str(self.ss_password.value)
         ))
 
-# ===== Загрузка скрипта =====
+# ===== Транспорт =====
 async def download_script(url: str) -> bytes:
     async with aiohttp.ClientSession() as s:
         async with s.get(url, allow_redirects=True) as r:
             data = await r.read()
-            if r.status != 200 or not data:
-                raise RuntimeError(f"Download failed: HTTP {r.status}")
+            if r.status != 200 or not data: raise RuntimeError(f"Download failed: HTTP {r.status}")
     t = data.decode("utf-8", "replace").replace("\r\n","\n").replace("\r","\n")
-    if not t.startswith("#!"):
-        raise RuntimeError("Downloaded content is not a script (no shebang)")
+    if not t.startswith("#!"): raise RuntimeError("Downloaded content is not a script (no shebang)")
     return t.encode("utf-8")
 
 async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_path: str):
     async with conn.start_sftp_client() as sftp:
-        async with sftp.open(remote_path, "wb") as f:
-            await f.write(data)
+        async with sftp.open(remote_path, "wb") as f: await f.write(data)
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)
 
-# ===== Подключение поверх готового TCP-сокета (IPv4) с баннером/задержкой =====
-OPENSSH_BANNER = "SSH-2.0-OpenSSH_8.9p1"
-
-def _fmt_exc(e: Exception) -> str:
-    return f"{type(e).__name__}: {str(e) or '(no message)'}"
-
-async def _open_tcp_ipv4(host: str, port: int, timeout: int) -> socket.socket:
-    loop = asyncio.get_event_loop()
-    infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
-    af, socktype, proto, _, sa = infos[0]
-    s = socket.socket(af, socktype, proto)
-    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    s.settimeout(timeout)
-    await loop.sock_connect(s, sa)
-    return s
-
-async def _connect_over_sock(sock: socket.socket, username: str, password: str):
-    loop = asyncio.get_event_loop()
-    # короткая задержка перед handshake
-    await asyncio.sleep(0.3)
-    # попытка прочитать баннер сервера (если пришёл)
-    try:
-        sock.settimeout(5)
-        _ = await loop.sock_recv(sock, 256)
-    except Exception:
-        pass
-    finally:
-        sock.settimeout(CONNECT_TIMEOUT)
-
-    # создаём SSH‑клиент поверх уже открытого сокета
-    return await asyncssh.connect(
-        None,
-        username=username,
-        password=password,
-        known_hosts=None,
-        client_keys=None,
-        connect_timeout=CONNECT_TIMEOUT,
-        login_timeout=LOGIN_TIMEOUT,
-        keepalive_interval=KEEPALIVE_INTERVAL,
-        family=socket.AF_INET,
-        sock=sock,
-        client_version=OPENSSH_BANNER,
-    )
-
 async def connect_resilient(host: str, username: str, password: str):
-    reasons = []
-
-    # Две попытки на 22
-    for attempt in (1, 2):
-        try:
-            sock = await _open_tcp_ipv4(host, 22, CONNECT_TIMEOUT)
+    last_exc = None
+    for port in SSH_PORTS:
+        for attempt in range(2):
             try:
-                return await _connect_over_sock(sock, username, password)
+                return await asyncssh.connect(
+                    host=host, port=port, username=username, password=password,
+                    known_hosts=None, client_keys=None,
+                    connect_timeout=CONNECT_TIMEOUT, login_timeout=LOGIN_TIMEOUT,
+                    keepalive_interval=KEEPALIVE_INTERVAL,
+                    kex_algs=KEX_ALGS, encryption_algs=CIPHERS, server_host_key_algs=HOSTKEY_ALGS,
+                )
             except Exception as e:
-                reasons.append(f"22/handshake{attempt}: {_fmt_exc(e)}")
-                try: sock.close()
-                except: pass
-        except Exception as e:
-            reasons.append(f"22/tcp{attempt}: {_fmt_exc(e)}")
-        await asyncio.sleep(1.0)
+                last_exc = e
+                await asyncio.sleep(1)
+    raise last_exc
 
-    # Порт 2222
-    try:
-        sock = await _open_tcp_ipv4(host, 2222, CONNECT_TIMEOUT)
-        try:
-            return await _connect_over_sock(sock, username, password)
-        except Exception as e:
-            reasons.append(f"2222/handshake: {_fmt_exc(e)}")
-            try: sock.close()
-            except: pass
-    except Exception as e:
-        reasons.append(f"2222/tcp: {_fmt_exc(e)}")
-
-    raise RuntimeError("SSH не доступен. Подробности: " + " ; ".join(reasons))
-
-# ===== Основной сценарий =====
+# ===== Основная логика =====
 async def run_remote_setup(interaction: discord.Interaction, mode: str, params: dict):
     async def send(msg: str):
-        if msg.strip():
-            await interaction.followup.send(msg[-1800:], ephemeral=True)
+        if msg.strip(): await interaction.followup.send(msg[-1800:], ephemeral=True)
 
     await send(f"Подключение по SSH… [{BUILD_TAG}]")
     finished = False
     try:
         async with await connect_resilient(params["host"], params["user"], params.get("password","")) as conn:
             await send("— Передача скрипта —")
-            content = await download_script(SCRIPT_URL)
-            await sftp_upload(conn, content, "setup_reboot.sh")
-            await send("Ок")
+            try:
+                content = await download_script(SCRIPT_URL)
+                await sftp_upload(conn, content, "setup_reboot.sh")
+                await send("Ок")
+            except Exception as e:
+                await send(f"Ошибка загрузки/передачи: {e}")
+                return
 
             run_cmd = (f"./setup_reboot.sh --final --password {sh_esc(params['ss_password'])}"
                        if mode == "final"
@@ -208,25 +152,58 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
                     elif "Настройка завершена. Перезагружаем сервер." in line:
                         finished = True
                         await send("Настройка завершена. Перезагружаем сервер.")
+                        # ЛС с кнопками
                         try:
                             dm = await interaction.user.create_dm()
 #                            await dm.send("Настройка завершена. Перезагружаем сервер.")
                             await dm.send("Выберите тип сервера:", view=RoleView())
                         except Exception:
                             pass
+                # небольшая пауза для сбора хвоста вывода
                 await asyncio.sleep(2)
             return
 
     except Exception as e:
         txt = str(e)
+        # Подавляем ожидаемый обрыв связи после финала
         suppress = finished and ("Connection lost" in txt or "Disconnect" in txt or "EOF" in txt)
         if not suppress:
             await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)
 
+# ===== UI модалки =====
+class IntermediateModal(discord.ui.Modal):
+    def __init__(self, title: str):
+        super().__init__(title=title)
+        self.host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)
+        self.ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)
+        self.forward_ip = discord.ui.TextInput(label="IP следующего сервера", placeholder="5.6.7.8", required=True)
+        self.ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)
+        for c in (self.host, self.ssh_pass, self.forward_ip, self.ss_password): self.add_item(c)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await run_remote_setup(interaction, "intermediate", dict(
+            host=str(self.host.value), user="root", port=None, password=str(self.ssh_pass.value),
+            forward_ip=str(self.forward_ip.value), ss_password=str(self.ss_password.value)
+        ))
+
+class FinalModal(discord.ui.Modal):
+    def __init__(self, title: str):
+        super().__init__(title=title)
+        self.host = discord.ui.TextInput(label="Хост (IP/домен)", placeholder="1.2.3.4", required=True)
+        self.ssh_pass = discord.ui.TextInput(label="SSH пароль", required=True)
+        self.ss_password = discord.ui.TextInput(label="Пароль Shadowsocks", required=True, min_length=6, max_length=64)
+        for c in (self.host, self.ssh_pass, self.ss_password): self.add_item(c)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await run_remote_setup(interaction, "final", dict(
+            host=str(self.host.value), user="root", port=None, password=str(self.ssh_pass.value),
+            ss_password=str(self.ss_password.value)
+        ))
+
 # ===== Инициализация =====
 @bot.event
 async def on_ready():
-    print(f"Starting ProxySetup banner-delay mode, {BUILD_TAG}")
+    print(f"Starting ProxySetup PTY FINISH-SUPPRESS, {BUILD_TAG}")
     if ALLOWED_CHANNEL_ID:
         ch = bot.get_channel(ALLOWED_CHANNEL_ID)
         if ch:
