@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, asyncio, discord, asyncssh, aiohttp, logging
+import os, asyncio, discord, asyncssh, aiohttp
 from discord.ext import commands
 
 # ===== Конфигурация =====
@@ -11,29 +11,16 @@ ALLOWED_ROLE = os.environ.get("ALLOWED_ROLE", "")
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip().isdigit()}
 ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"
 
-# Диагностика
-ASYNCSSH_DEBUG = os.environ.get("ASYNCSSH_DEBUG", "") == "1"
+# SSH параметры
+SSH_PORTS = [22, 2222]
+CONNECT_TIMEOUT = 10
+LOGIN_TIMEOUT = 45
+KEEPALIVE_INTERVAL = 10
+KEX_ALGS = ['curve25519-sha256']
+CIPHERS = ['chacha20-poly1305@openssh.com']
+HOSTKEY_ALGS = ['ssh-ed25519']
 
-# ===== SSH параметры (slow connect) =====
-SSH_PORTS = [22]
-CONNECT_TIMEOUT = 30        # TCP dial timeout
-LOGIN_TIMEOUT = 300         # SSH handshake+auth timeout
-KEEPALIVE_INTERVAL = 20     # seconds
-
-# Совместимый набор алгоритмов
-KEX_ALGS = ['curve25519-sha256','curve25519-sha256@libssh.org','diffie-hellman-group14-sha256']
-CIPHERS  = ['chacha20-poly1305@openssh.com','aes256-gcm@openssh.com','aes128-gcm@openssh.com']
-HOSTKEY_ALGS = ['ssh-ed25519','rsa-sha2-256','rsa-sha2-512']
-
-BUILD_TAG = "bot-slowconnect-2025-09-30-14-45"
-
-# Логирование
-logging.basicConfig(level=logging.INFO)
-if ASYNCSSH_DEBUG:
-    logging.getLogger('asyncssh').setLevel(logging.DEBUG)
-    asyncssh.set_log_level('DEBUG')
-else:
-    asyncssh.set_log_level('WARNING')
+BUILD_TAG = "bot-pty-finished-suppress-2025-09-23-16-42"
 
 # ===== Discord клиент =====
 intents = discord.Intents.default()
@@ -117,50 +104,22 @@ async def sftp_upload(conn: asyncssh.SSHClientConnection, data: bytes, remote_pa
         async with sftp.open(remote_path, "wb") as f: await f.write(data)
     await conn.run(f"chmod +x {sh_esc(remote_path)}", check=True)
 
-# ===== Префлайт баннера (медленный) =====
-async def preflight_banner(host: str, port: int, interaction: discord.Interaction):
-    try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=CONNECT_TIMEOUT)
-        # отправляем свою строку версии и ждём ответный баннер
-        writer.write(b"SSH-2.0-asyncssh\r\n")
-        await writer.drain()
-        banner = await asyncio.wait_for(reader.readline(), timeout=60)
-        txt = banner.decode(errors='ignore').strip()
-        await interaction.followup.send(f"SSH banner {host}:{port}: {txt}", ephemeral=True)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-    except Exception as e:
-        await interaction.followup.send(f"SSH banner preflight failed {host}:{port}: {type(e).__name__}: {e}", ephemeral=True)
-
-# ===== Подключение (1 попытка, долгие таймауты) =====
-async def connect_slow(host: str, username: str, password: str, interaction: discord.Interaction):
-    await preflight_banner(host, 22, interaction)
-    try:
-        conn = await asyncssh.connect(
-            host=host, port=22, username=username, password=password,
-            known_hosts=None, client_keys=None,
-            connect_timeout=CONNECT_TIMEOUT, login_timeout=LOGIN_TIMEOUT,
-            keepalive_interval=KEEPALIVE_INTERVAL,
-            kex_algs=KEX_ALGS, encryption_algs=CIPHERS, server_host_key_algs=HOSTKEY_ALGS,
-            preferred_auth=['keyboard-interactive','password'],
-            compression_algs=None
-        )
-        # показать согласованные параметры
-        try:
-            cipher = conn.get_extra_info('cipher'); kex = conn.get_extra_info('kex'); hostkeys = conn.get_server_host_key_algs()
-            await interaction.followup.send(
-                f"SSH negotiated {host}:22 -> cipher={cipher}, kex={kex}, hostkey={hostkeys}",
-                ephemeral=True
-            )
-        except Exception:
-            pass
-        return conn
-    except Exception as e:
-        await interaction.followup.send(f"[ssh] connect failed {host}:22: {type(e).__name__}: {e}", ephemeral=True)
-        raise
+async def connect_resilient(host: str, username: str, password: str):
+    last_exc = None
+    for port in SSH_PORTS:
+        for attempt in range(2):
+            try:
+                return await asyncssh.connect(
+                    host=host, port=port, username=username, password=password,
+                    known_hosts=None, client_keys=None,
+                    connect_timeout=CONNECT_TIMEOUT, login_timeout=LOGIN_TIMEOUT,
+                    keepalive_interval=KEEPALIVE_INTERVAL,
+                    kex_algs=KEX_ALGS, encryption_algs=CIPHERS, server_host_key_algs=HOSTKEY_ALGS,
+                )
+            except Exception as e:
+                last_exc = e
+                await asyncio.sleep(1)
+    raise last_exc
 
 # ===== Основная логика =====
 async def run_remote_setup(interaction: discord.Interaction, mode: str, params: dict):
@@ -170,7 +129,7 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
     await send(f"Подключение по SSH… [{BUILD_TAG}]")
     finished = False
     try:
-        async with await connect_slow(params["host"], params["user"], params.get("password",""), interaction) as conn:
+        async with await connect_resilient(params["host"], params["user"], params.get("password","")) as conn:
             await send("— Передача скрипта —")
             try:
                 content = await download_script(SCRIPT_URL)
@@ -184,41 +143,34 @@ async def run_remote_setup(interaction: discord.Interaction, mode: str, params: 
                        if mode == "final"
                        else f"./setup_reboot.sh --forward-ip {sh_esc(params['forward_ip'])} --password {sh_esc(params['ss_password'])}")
 
-            # PTY только для запуска скрипта
             async with conn.create_process(run_cmd, term_type='xterm', term_size=(80, 24)) as proc:
-                async def drain_stream(stream, is_err=False):
-                    async for raw in stream:
-                        line = raw.rstrip("\r\n")
-                        if not line: continue
-                        if line.startswith("==="):
-                            await send(line)
-                        elif "Настройка завершена. Перезагружаем сервер." in line:
-                            nonlocal finished
-                            finished = True
-                            await send("Настройка завершена. Перезагружаем сервер.")
-                            try:
-                                dm = await interaction.user.create_dm()
-                                await dm.send("Выберите тип сервера:", view=RoleView())
-                            except Exception:
-                                pass
-                        elif is_err:
-                            await send(f"[stderr] {line}")
-                        else:
+                async for raw in proc.stdout:
+                    line = raw.rstrip("\r\n")
+                    if not line: continue
+                    if line.startswith("==="):
+                        await send(line)
+                    elif "Настройка завершена. Перезагружаем сервер." in line:
+                        finished = True
+                        await send("Настройка завершена. Перезагружаем сервер.")
+                        # ЛС с кнопками
+                        try:
+                            dm = await interaction.user.create_dm()
+#                            await dm.send("Настройка завершена. Перезагружаем сервер.")
+                            await dm.send("Выберите тип сервера:", view=RoleView())
+                        except Exception:
                             pass
-
-                t_out = asyncio.create_task(drain_stream(proc.stdout, is_err=False))
-                t_err = asyncio.create_task(drain_stream(proc.stderr, is_err=True))
-                await asyncio.gather(t_out, t_err)
+                # небольшая пауза для сбора хвоста вывода
                 await asyncio.sleep(2)
             return
 
     except Exception as e:
         txt = str(e)
+        # Подавляем ожидаемый обрыв связи после финала
         suppress = finished and ("Connection lost" in txt or "Disconnect" in txt or "EOF" in txt)
         if not suppress:
-            await interaction.followup.send(f"Ошибка SSH/выполнения: {type(e).__name__}: {e}", ephemeral=True)
+            await interaction.followup.send(f"Ошибка SSH/выполнения: {e}", ephemeral=True)
 
-# ===== UI модалки (дубли) =====
+# ===== UI модалки =====
 class IntermediateModal(discord.ui.Modal):
     def __init__(self, title: str):
         super().__init__(title=title)
@@ -251,7 +203,7 @@ class FinalModal(discord.ui.Modal):
 # ===== Инициализация =====
 @bot.event
 async def on_ready():
-    print(f"Starting ProxySetup SLOW CONNECT, {BUILD_TAG}")
+    print(f"Starting ProxySetup PTY FINISH-SUPPRESS, {BUILD_TAG}")
     if ALLOWED_CHANNEL_ID:
         ch = bot.get_channel(ALLOWED_CHANNEL_ID)
         if ch:
