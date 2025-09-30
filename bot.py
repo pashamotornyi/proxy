@@ -12,7 +12,7 @@ ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") 
 ALLOW_ALL = os.environ.get("ALLOW_ALL", "") == "1"
 
 # SSH параметры
-SSH_PORTS = [22, 2222]
+SSH_PORTS = [22]
 CONNECT_TIMEOUT = 10
 LOGIN_TIMEOUT = 45
 KEEPALIVE_INTERVAL = 10
