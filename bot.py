@@ -21,14 +21,14 @@ LOGIN_TIMEOUT = 150
 KEEPALIVE_INTERVAL = 15
 
 # На время диагностики позволяем авто-подбор алгоритмов (None)
-KEX_ALGS = None
-CIPHERS = None
-HOSTKEY_ALGS = None
+# KEX_ALGS = None
+# CIPHERS  = None
+# HOSTKEY_ALGS = None
 
-# Если понадобится вернуть ограниченный набор — раскомментировать:
-# KEX_ALGS = ['curve25519-sha256','curve25519-sha256@libssh.org','diffie-hellman-group14-sha256']
-# CIPHERS  = ['chacha20-poly1305@openssh.com','aes256-gcm@openssh.com','aes128-gcm@openssh.com']
-# HOSTKEY_ALGS = ['ssh-ed25519','rsa-sha2-256','rsa-sha2-512']
+# Совместимый набор по умолчанию
+KEX_ALGS = ['curve25519-sha256','curve25519-sha256@libssh.org','diffie-hellman-group14-sha256']
+CIPHERS  = ['chacha20-poly1305@openssh.com','aes256-gcm@openssh.com','aes128-gcm@openssh.com']
+HOSTKEY_ALGS = ['ssh-ed25519','rsa-sha2-256','rsa-sha2-512']
 
 BUILD_TAG = "bot-preflight-autoalgs-2025-09-30-14-25"
 
